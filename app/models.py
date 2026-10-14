@@ -70,6 +70,9 @@ class User(Base):
     workouts: Mapped[list["Workout"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    push_subscriptions: Mapped[list["PushSubscription"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class WeighIn(Base):
@@ -147,3 +150,21 @@ class WorkoutSet(Base):
     @property
     def exercise_name(self) -> str:
         return self.exercise.name
+
+
+class PushSubscription(Base):
+    """One device that agreed to receive notifications (a phone, a laptop browser...).
+
+    The browser hands us these three values when the user allows notifications.
+    endpoint is a unique URL at Apple/Google/Mozilla's push service for that device;
+    p256dh and auth are keys used to encrypt the message so only that device can read it.
+    """
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    endpoint: Mapped[str] = mapped_column(String(1000), unique=True)
+    p256dh: Mapped[str] = mapped_column(String(200))
+    auth: Mapped[str] = mapped_column(String(100))
+
+    user: Mapped[User] = relationship(back_populates="push_subscriptions")

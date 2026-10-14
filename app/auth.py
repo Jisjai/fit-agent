@@ -21,7 +21,10 @@ from pydantic import BaseModel
 
 COOKIE = "fa_session"
 MAX_AGE = 60 * 60 * 24 * 90  # stay logged in for 90 days
-OPEN_PATHS = {"/", "/login", "/logout", "/health", "/favicon.ico"}
+OPEN_PATHS = {"/", "/login", "/logout", "/health", "/favicon.ico",
+              "/manifest.webmanifest", "/sw.js"}
+OPEN_PREFIXES = ("/icons/",  # phones fetch the icon and manifest without your login cookie
+                 "/cron/")   # the scheduler has no cookie; it proves itself with CRON_SECRET
 
 router = APIRouter(tags=["auth"])
 
@@ -37,7 +40,8 @@ def _token(password: str) -> str:
 async def require_login(request: Request, call_next):
     """Middleware: runs before every request and turns away anyone without the cookie."""
     password = _password()
-    if password and request.url.path not in OPEN_PATHS:
+    path = request.url.path
+    if password and path not in OPEN_PATHS and not path.startswith(OPEN_PREFIXES):
         cookie = request.cookies.get(COOKIE, "")
         # compare_digest takes the same time whether the first or last character differs,
         # so attackers can't guess the token one character at a time by timing responses.

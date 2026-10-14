@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Fit Agent</title>
+<!-- Makes it installable as a phone app ("Add to Home Screen") -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#2f7d5b">
+<link rel="icon" href="/icons/favicon-32.png" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Fit Agent">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <style>
   :root {
     --bg: #f4f5f2; --card: #ffffff; --ink: #1d2320; --muted: #6b736e; --line: #e2e5e0;
@@ -21,7 +30,9 @@
     margin: 0; background: var(--bg); color: var(--ink);
     font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
+  body { padding-bottom: env(safe-area-inset-bottom); }
   header {
+    padding-top: max(14px, env(safe-area-inset-top)) !important;
     display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
     padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--card);
     position: sticky; top: 0; z-index: 5;
@@ -213,6 +224,16 @@
       <h2>Weight trend <span class="muted">· last 30 days</span></h2>
       <div id="trend"></div>
     </section>
+
+    <section class="card">
+      <h2>Reminders</h2>
+      <p class="muted" id="pushStatus" style="margin:0 0 10px">Checking…</p>
+      <div style="display:flex; gap:8px; flex-wrap:wrap">
+        <button id="pushOn" class="hidden">Turn on reminders</button>
+        <button id="pushTest" class="ghost hidden">Send a test</button>
+        <button id="pushOff" class="ghost hidden">Turn off</button>
+      </div>
+    </section>
   </div>
 
   <aside class="card chat">
@@ -316,6 +337,7 @@ function showApp() {
   $("#onboarding").classList.add("hidden");
   $("#app").classList.remove("hidden");
   $("#topControls").classList.remove("hidden");
+  refreshPushUI().catch(() => {});
   refresh();
 }
 
@@ -559,6 +581,80 @@ $("#loginForm").addEventListener("submit", async (e) => {
     init();
   } catch (err) { toast(err.message); }
 });
+
+/* ---------- phone app support ---------- */
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+
+/* ---------- reminders (push notifications) ---------- */
+const pushSupported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+const isInstalled = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+
+function showPush(text, { on = false, test = false, off = false } = {}) {
+  $("#pushStatus").textContent = text;
+  $("#pushOn").classList.toggle("hidden", !on);
+  $("#pushTest").classList.toggle("hidden", !test);
+  $("#pushOff").classList.toggle("hidden", !off);
+}
+
+// The browser wants the server's public key as raw bytes, not as text.
+function keyToBytes(base64url) {
+  const padded = (base64url + "=".repeat((4 - base64url.length % 4) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+}
+
+async function currentSubscription() {
+  const reg = await navigator.serviceWorker.ready;
+  return reg.pushManager.getSubscription();
+}
+
+async function refreshPushUI() {
+  if (!pushSupported) {
+    return showPush(isIOS && !isInstalled
+      ? "On iPhone, reminders work once the app is on your home screen: Safari → Share → Add to Home Screen, then open it from there."
+      : "This browser doesn't support notifications.");
+  }
+  if (Notification.permission === "denied") {
+    return showPush("Notifications are blocked for this app. Allow them in your phone's settings, then come back.");
+  }
+  const sub = await currentSubscription();
+  if (sub) {
+    showPush("On. Weigh-in reminder around 08:00 if you haven't logged it, and a wrap-up of your day around 22:00.",
+             { test: true, off: true });
+  } else {
+    showPush("Get a morning weigh-in reminder and an evening wrap-up of your day.", { on: true });
+  }
+}
+
+$("#pushOn").onclick = async () => {
+  try {
+    const { key } = await api("/push/public-key");
+    if (await Notification.requestPermission() !== "granted") return refreshPushUI();
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyToBytes(key) });
+    await api(`/users/${state.userId}/push/subscribe`, { method: "POST", body: sub.toJSON() });
+    toast("Reminders on");
+    await api(`/users/${state.userId}/push/test`, { method: "POST" });
+  } catch (err) { toast(err.message); }
+  refreshPushUI();
+};
+$("#pushTest").onclick = async () => {
+  try { await api(`/users/${state.userId}/push/test`, { method: "POST" }); toast("Test sent"); }
+  catch (err) { toast(err.message); }
+};
+$("#pushOff").onclick = async () => {
+  try {
+    const sub = await currentSubscription();
+    if (sub) {
+      await api(`/users/${state.userId}/push/unsubscribe`, { method: "POST", body: { endpoint: sub.endpoint } });
+      await sub.unsubscribe();
+    }
+    toast("Reminders off");
+  } catch (err) { toast(err.message); }
+  refreshPushUI();
+};
 
 /* ---------- start ---------- */
 async function init() {
