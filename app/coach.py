@@ -361,7 +361,8 @@ def ask_coach(db: Session, user: User, message: str, history: list[dict], client
             actions += done
             parts.append(types.Part.from_function_response(
                 name=call.name, response={"result": json.loads(output)}))
-        contents.append(types.Content(role="tool", parts=parts))
+        # Gemini expects tool results in a "user" turn (it rejects a "tool" role).
+        contents.append(types.Content(role="user", parts=parts))
 
     fallback = "Sorry, I got stuck partway. Check the log on the left and tell me what's missing."
     return fallback, actions

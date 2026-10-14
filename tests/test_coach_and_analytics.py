@@ -91,7 +91,8 @@ def _text(t):
 def _tool_result(fake, call_index=1):
     """What our code sent back to the model as the first tool result."""
     tool_turn = fake.calls[call_index]["contents"][-1]
-    assert tool_turn.role == "tool"
+    assert tool_turn.role == "user"
+    assert tool_turn.parts[0].function_response is not None
     return tool_turn.parts[0].function_response.response["result"]
 
 
