@@ -3,7 +3,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..coach import ask_coach
+from ..coach import CoachBusy, ask_coach
 from ..database import get_db
 from ..deps import get_user
 from ..models import User
@@ -38,6 +38,11 @@ def chat(
     history = [turn.model_dump() for turn in payload.history]
     try:
         reply, actions = ask_coach(db, user, payload.message, history, client, payload.date)
+    except CoachBusy:
+        raise HTTPException(
+            status_code=503,
+            detail="The AI is overloaded right now (Google's side). Please try again in a minute.",
+        )
     except Exception as e:  # network trouble, invalid key, rate limit...
         raise HTTPException(status_code=502, detail=f"Coach unavailable: {type(e).__name__}: {e}")
     return CoachReply(reply=reply, actions=actions)

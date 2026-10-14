@@ -1,7 +1,10 @@
 import json
 from types import SimpleNamespace as NS
 
+from google.genai import errors as genai_errors
 from google.genai import types
+
+import app.coach as coach_module
 
 from app.main import app
 from app.routers.coach import get_ai_client
@@ -68,7 +71,10 @@ class FakeGemini:
     def generate_content(self, **kwargs):
         # Copy the list: the coach keeps appending to the same one between calls.
         self.calls.append({**kwargs, "contents": list(kwargs["contents"])})
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):  # lets a test simulate Google errors
+            raise response
+        return response
 
 
 def _tool_call(name, args):
@@ -193,3 +199,49 @@ def test_coach_bad_tool_input_is_reported_not_saved(client, user):
 def test_tool_schemas_have_no_refs():
     from app.coach import TOOLS
     assert "$ref" not in json.dumps(TOOLS)
+
+
+# --- When Google is overloaded ---------------------------------------------------
+
+def _overloaded():
+    return genai_errors.ServerError(503, {"error": {
+        "code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+
+
+def test_coach_retries_when_overloaded(client, user, monkeypatch):
+    monkeypatch.setattr(coach_module.time, "sleep", lambda s: None)  # don't actually wait
+    fake = FakeGemini([_overloaded(), _overloaded(), _text("Hi!")])
+    use(fake)
+    r = client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
+    assert r.status_code == 200
+    assert r.json()["reply"] == "Hi!"
+    assert len(fake.calls) == 3
+
+
+def test_coach_falls_back_to_lighter_model(client, user, monkeypatch):
+    monkeypatch.setattr(coach_module.time, "sleep", lambda s: None)
+    fake = FakeGemini([_overloaded()] * 3 + [_text("From the backup model.")])
+    use(fake)
+    r = client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
+    assert r.status_code == 200
+    assert fake.calls[0]["model"] == coach_module.MODEL
+    assert fake.calls[3]["model"] == coach_module.FALLBACK_MODEL
+
+
+def test_coach_gives_friendly_error_when_everything_is_busy(client, user, monkeypatch):
+    monkeypatch.setattr(coach_module.time, "sleep", lambda s: None)
+    use(FakeGemini([_overloaded()] * 6))
+    r = client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
+    assert r.status_code == 503
+    assert "try again" in r.json()["detail"]
+
+
+def test_coach_does_not_retry_a_bad_api_key(client, user, monkeypatch):
+    monkeypatch.setattr(coach_module.time, "sleep", lambda s: None)
+    bad_key = genai_errors.ClientError(400, {"error": {
+        "code": 400, "message": "API key not valid", "status": "INVALID_ARGUMENT"}})
+    fake = FakeGemini([bad_key])
+    use(fake)
+    r = client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
+    assert r.status_code == 502
+    assert len(fake.calls) == 1   # gave up immediately, no pointless retries
