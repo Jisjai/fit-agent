@@ -14,9 +14,11 @@ every number it reports comes from services.py.
 """
 import json
 import os
+import time
 import datetime as dt
 from datetime import timedelta
 
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
@@ -27,6 +29,11 @@ from .schemas import FoodEntryCreate
 
 # "gemini-flash-latest" always points at Google's newest Flash model.
 MODEL = os.getenv("COACH_MODEL", "gemini-flash-latest")
+# Used when the main model is overloaded: smaller, cheaper, usually has capacity.
+FALLBACK_MODEL = os.getenv("COACH_FALLBACK_MODEL", "gemini-flash-lite-latest")
+# 429 = too many requests, 500/503 = Google's side is struggling. Worth retrying.
+RETRYABLE_CODES = {429, 500, 503}
+RETRY_WAITS = (0, 2, 4)  # seconds to wait before each attempt, per model
 MAX_TOOL_ROUNDS = 10     # safety stop so a confused model can't loop forever
 MAX_RANGE_DAYS = 90
 
@@ -300,6 +307,26 @@ def _to_gemini_history(history: list[dict]) -> list[types.Content]:
     ]
 
 
+class CoachBusy(Exception):
+    """Every model we tried was overloaded. The user should simply try again later."""
+
+
+def _generate(client, contents, config):
+    """Call Gemini, retrying when it's overloaded and then falling back to a lighter model.
+
+    Errors that retrying can't fix (bad API key, invalid request) are raised right away.
+    """
+    for model in (MODEL, FALLBACK_MODEL):
+        for wait in RETRY_WAITS:
+            time.sleep(wait)
+            try:
+                return client.models.generate_content(model=model, contents=contents, config=config)
+            except genai_errors.APIError as e:
+                if e.code not in RETRYABLE_CODES:
+                    raise
+    raise CoachBusy()
+
+
 def ask_coach(db: Session, user: User, message: str, history: list[dict], client,
               today: dt.date | None = None) -> tuple[str, list[str]]:
     """Run the agent loop. Returns (final text reply, list of things it logged)."""
@@ -319,7 +346,7 @@ def ask_coach(db: Session, user: User, message: str, history: list[dict], client
     actions: list[str] = []
 
     for _ in range(MAX_TOOL_ROUNDS):
-        response = client.models.generate_content(model=MODEL, contents=contents, config=config)
+        response = _generate(client, contents, config)
 
         calls = response.function_calls or []
         if not calls:
