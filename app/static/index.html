@@ -13,6 +13,8 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Fit Agent">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
+<!-- Google's "Sign in with Google" button -->
+<script src="https://accounts.google.com/gsi/client" async></script>
 <style>
   :root {
     --bg: #f4f5f2; --card: #ffffff; --ink: #1d2320; --muted: #6b736e; --line: #e2e5e0;
@@ -114,18 +116,17 @@
     <button class="ghost" id="prevDay" aria-label="Previous day">&larr;</button>
     <input type="date" id="dayPicker">
     <button class="ghost" id="nextDay" aria-label="Next day">&rarr;</button>
-    <select id="userSelect" aria-label="Profile"></select>
-    <button class="ghost" id="newUserBtn">New profile</button>
+    <span class="muted" id="whoami"></span>
+    <button class="ghost" id="logoutBtn">Sign out</button>
   </div>
 </header>
 
-<!-- Login (only shown when the server has a password set) -->
+<!-- Sign in -->
 <section id="loginBox" class="card onboard hidden">
-  <h2>Log in</h2>
-  <form id="loginForm" class="grid">
-    <label class="wide">Password <input name="password" type="password" required autocomplete="current-password"></label>
-    <button type="submit">Log in</button>
-  </form>
+  <h2>Sign in</h2>
+  <p class="muted">Your log and coach chats are private to your Google account.</p>
+  <div id="googleBtn"></div>
+  <p class="muted hidden" id="loginError"></p>
 </section>
 
 <!-- First run: create a profile -->
@@ -157,7 +158,6 @@
     </label>
     <div class="wide" style="display:flex; gap:8px">
       <button type="submit">Create profile</button>
-      <button type="button" class="ghost hidden" id="cancelNewUser">Cancel</button>
     </div>
   </form>
 </section>
@@ -250,6 +250,7 @@
       <textarea id="chatInput" placeholder="What did you eat or do?" maxlength="2000"></textarea>
       <button type="submit" id="chatSend">Send</button>
     </form>
+    <p class="muted hidden" id="coachLeft"></p>
   </aside>
 </main>
 
@@ -284,9 +285,9 @@ async function api(path, { method = "GET", body } = {}) {
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (res.status === 401 && path !== "/login") {
+  if (res.status === 401 && path !== "/auth/google") {
     showLogin();
-    throw new Error("Please log in");
+    throw new Error("Please sign in");
   }
   if (!res.ok) {
     let detail = res.statusText;
@@ -313,25 +314,23 @@ function formData(form) {
 /* ---------- state ---------- */
 const state = { userId: null, day: localISO(new Date()), exercises: [], chat: [] };
 
-/* ---------- users ---------- */
-async function loadUsers(selectId) {
-  const users = await api("/users");
-  const sel = $("#userSelect");
-  sel.innerHTML = users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
-  if (!users.length) return showOnboarding(false);
-
-  const stored = Number(selectId ?? load("fitUser"));
-  state.userId = users.some(u => u.id === stored) ? stored : users[0].id;
-  sel.value = state.userId;
-  store("fitUser", state.userId);
+/* ---------- your profile ---------- */
+async function loadUsers() {
+  // The server only ever returns YOUR profile: an empty list means you haven't made one yet.
+  const [users, me] = await Promise.all([api("/users"), api("/auth/me")]);
+  $("#whoami").textContent = me.email || "";
+  if (!users.length) {
+    $("#userForm").elements.name.value ||= me.name || "";
+    return showOnboarding();
+  }
+  state.userId = users[0].id;
   showApp();
 }
 
-function showOnboarding(canCancel) {
+function showOnboarding() {
   $("#onboarding").classList.remove("hidden");
   $("#app").classList.add("hidden");
-  $("#topControls").classList.toggle("hidden", !canCancel);
-  $("#cancelNewUser").classList.toggle("hidden", !canCancel);
+  $("#topControls").classList.add("hidden");
 }
 function showApp() {
   $("#onboarding").classList.add("hidden");
@@ -347,16 +346,10 @@ $("#userForm").addEventListener("submit", async (e) => {
     const user = await api("/users", { method: "POST", body: formData(e.target) });
     e.target.reset();
     state.chat = []; resetChat();
-    await loadUsers(user.id);
+    await loadUsers();
     toast(`Welcome, ${user.name}!`);
   } catch (err) { toast(err.message); }
 });
-$("#newUserBtn").onclick = () => showOnboarding(true);
-$("#cancelNewUser").onclick = showApp;
-$("#userSelect").onchange = (e) => {
-  state.userId = Number(e.target.value); store("fitUser", state.userId);
-  state.chat = []; resetChat(); refresh();
-};
 
 /* ---------- day navigation ---------- */
 function setDay(iso) { state.day = iso; $("#dayPicker").value = iso; refresh(); }
@@ -543,10 +536,11 @@ async function sendChat(text) {
   $("#chatSend").disabled = true;
   const thinking = addMsg("assistant", "Looking at your data…");
   try {
-    const { reply, actions } = await api(`/users/${state.userId}/coach`, {
+    const { reply, actions, messages_left } = await api(`/users/${state.userId}/coach`, {
       method: "POST", body: { message: text, history: state.chat.slice(-20), date: state.day },
     });
     thinking.textContent = reply;
+    showMessagesLeft(messages_left);
     if (actions.length) {
       const box = document.createElement("div");
       box.className = "actions";
@@ -561,26 +555,57 @@ async function sendChat(text) {
     thinking.className = "msg error"; thinking.textContent = err.message;
   } finally { $("#chatSend").disabled = false; }
 }
+function showMessagesLeft(left) {
+  // Only worth mentioning when you're running low.
+  const el = $("#coachLeft");
+  el.textContent = left === 1 ? "1 coach message left today." : `${left} coach messages left today.`;
+  el.classList.toggle("hidden", left == null || left > 5);
+}
 $("#chatForm").addEventListener("submit", (e) => { e.preventDefault(); sendChat($("#chatInput").value); });
 $("#chatInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(e.target.value); }
 });
 $("#suggestions").addEventListener("click", (e) => e.target.dataset.q && sendChat(e.target.dataset.q));
 
-/* ---------- login ---------- */
-function showLogin() {
+/* ---------- sign in with Google ---------- */
+async function showLogin() {
   $("#loginBox").classList.remove("hidden");
   ["#onboarding", "#app", "#topControls"].forEach(s => $(s).classList.add("hidden"));
-}
-$("#loginForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
+  const err = $("#loginError");
   try {
-    await api("/login", { method: "POST", body: formData(e.target) });
-    e.target.reset();
+    const { google_client_id } = await api("/auth/config");
+    if (!google_client_id) throw new Error("Sign-in isn't set up on the server yet (GOOGLE_CLIENT_ID).");
+    await waitForGoogle();
+    google.accounts.id.initialize({ client_id: google_client_id, callback: onGoogleCredential });
+    google.accounts.id.renderButton($("#googleBtn"), { theme: "outline", size: "large", text: "signin_with" });
+  } catch (e) {
+    err.textContent = e.message; err.classList.remove("hidden");
+  }
+}
+function waitForGoogle() {
+  // Google's script loads asynchronously; wait (up to ~5 s) until it's ready.
+  return new Promise((resolve, reject) => {
+    let tries = 0;
+    const check = () => window.google?.accounts?.id ? resolve()
+      : ++tries > 50 ? reject(new Error("Couldn't load Google sign-in. Check your connection."))
+      : setTimeout(check, 100);
+    check();
+  });
+}
+async function onGoogleCredential({ credential }) {
+  try {
+    // Google gave the page a signed ID token; the server checks it and sets our cookie.
+    await api("/auth/google", { method: "POST", body: { credential } });
     $("#loginBox").classList.add("hidden");
     init();
-  } catch (err) { toast(err.message); }
-});
+  } catch (e) { toast(e.message); }
+}
+$("#logoutBtn").onclick = async () => {
+  await api("/auth/logout", { method: "POST" }).catch(() => {});
+  window.google?.accounts?.id.disableAutoSelect();
+  state.userId = null; state.chat = []; resetChat();
+  showLogin();
+};
 
 /* ---------- phone app support ---------- */
 if ("serviceWorker" in navigator) {
@@ -666,7 +691,7 @@ async function init() {
     addSetRow();
     await loadUsers();
   } catch (err) {
-    if (err.message !== "Please log in") toast("Can't reach the server: " + err.message);
+    if (err.message !== "Please sign in") toast("Can't reach the server: " + err.message);
   }
 }
 init();

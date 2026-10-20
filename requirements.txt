@@ -4,6 +4,8 @@ sqlalchemy>=2.0
 psycopg[binary]>=3.2
 pydantic>=2.6
 anthropic>=0.40
+google-auth>=2.0
+requests>=2.31
 pywebpush>=2.0
 tzdata
 pytest>=8.0

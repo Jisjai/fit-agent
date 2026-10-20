@@ -6,7 +6,7 @@ That's the payoff of going through SQLAlchemy instead of writing SQL by hand.
 """
 import os
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 
@@ -54,3 +54,22 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def add_missing_columns(bind=None):
+    """Tiny hand-written migration for databases created before Google sign-in.
+
+    create_all() makes missing TABLES but never adds COLUMNS to a table that already
+    exists, so an older `users` table needs these two added by hand. Running it again
+    does nothing. (A bigger app would use Alembic migrations for this.)
+    """
+    bind = bind or engine
+    if "users" not in inspect(bind).get_table_names():
+        return
+    columns = {c["name"] for c in inspect(bind).get_columns("users")}
+    if "google_sub" in columns:
+        return
+    with bind.begin() as conn:
+        conn.execute(text("ALTER TABLE users ADD COLUMN google_sub VARCHAR(255)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(320)"))
+        conn.execute(text("CREATE UNIQUE INDEX ix_users_google_sub ON users (google_sub)"))

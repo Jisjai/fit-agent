@@ -148,3 +148,5 @@ class CoachReply(BaseModel):
     reply: str
     # Short descriptions of what the agent saved, e.g. "Food · Oatmeal with banana · 380 kcal".
     actions: list[str] = Field(default_factory=list)
+    # Coach messages the user has left today (see COACH_DAILY_LIMIT).
+    messages_left: int | None = None

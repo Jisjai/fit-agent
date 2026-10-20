@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 from . import auth
-from .database import Base, SessionLocal, engine
+from .database import Base, SessionLocal, add_missing_columns, engine
 from .routers import coach, food, push, summary, users, weight, workouts
 from .seed_data import seed_exercises
 
@@ -18,14 +18,15 @@ async def lifespan(_app: FastAPI):
     # On startup: create tables if missing and make sure exercises exist.
     # (Later we'd replace create_all with proper migrations via Alembic.)
     Base.metadata.create_all(bind=engine)
+    add_missing_columns()
     with SessionLocal() as db:
         seed_exercises(db)
     yield
 
 
-app = FastAPI(title="Fit Agent", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Fit Agent", version="0.5.0", lifespan=lifespan)
 
-# Runs before every request: blocks the API unless logged in (when APP_PASSWORD is set).
+# Runs before every request: blocks the API unless signed in with Google.
 app.middleware("http")(auth.require_login)
 
 app.include_router(auth.router)

@@ -74,8 +74,8 @@ def test_cron_refuses_to_run_when_no_secret_is_configured(client, monkeypatch):
                       headers={"Authorization": "Bearer "}).status_code == 503
 
 
-def test_cron_works_behind_the_password_gate(client, user, push_env, monkeypatch):
-    monkeypatch.setenv("APP_PASSWORD", "pw")   # no login cookie, but the secret is enough
+def test_cron_works_without_a_session(client, user, push_env):
+    client.cookies.clear()   # the scheduler has no cookie, but the secret is enough
     assert run_cron(client, "morning").status_code == 200
 
 

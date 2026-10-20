@@ -53,6 +53,10 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Who owns this profile: Google's permanent account ID, plus the email for reference.
+    # Empty for profiles made before Google sign-in existed (nobody can open those).
+    google_sub: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
+    email: Mapped[str | None] = mapped_column(String(320))
     name: Mapped[str] = mapped_column(String(100))
     height_cm: Mapped[float]
     birth_year: Mapped[int]
@@ -168,3 +172,14 @@ class PushSubscription(Base):
     auth: Mapped[str] = mapped_column(String(100))
 
     user: Mapped[User] = relationship(back_populates="push_subscriptions")
+
+
+class CoachUsage(Base):
+    """How many coach messages a user sent on a day. Used for the daily limit."""
+    __tablename__ = "coach_usage"
+    __table_args__ = (UniqueConstraint("user_id", "date", name="uq_coach_usage_user_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    date: Mapped[dt.date]
+    count: Mapped[int] = mapped_column(default=0)

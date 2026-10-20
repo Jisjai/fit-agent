@@ -251,3 +251,44 @@ def test_coach_does_not_retry_a_bad_api_key(client, user, monkeypatch):
     r = client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
     assert r.status_code == 502
     assert len(fake.calls) == 1   # gave up immediately, no pointless retries
+
+
+# --- Daily coach limit -----------------------------------------------------------
+
+def test_coach_daily_limit(client, user, monkeypatch):
+    monkeypatch.setenv("COACH_DAILY_LIMIT", "2")
+    fake = FakeClaude([_text("one"), _text("two")])
+    use(fake)
+    uid = user["id"]
+
+    first = client.post(f"/users/{uid}/coach", json={"message": "hi"})
+    assert first.json()["messages_left"] == 1
+    assert client.post(f"/users/{uid}/coach", json={"message": "hi"}).json()["messages_left"] == 0
+
+    third = client.post(f"/users/{uid}/coach", json={"message": "hi"})
+    assert third.status_code == 429
+    assert "reset" in third.json()["detail"]
+    assert len(fake.calls) == 2   # the third message never reached the (paid) API
+
+
+def test_failed_coach_calls_dont_use_up_the_limit(client, user, monkeypatch):
+    monkeypatch.setenv("COACH_DAILY_LIMIT", "1")
+    monkeypatch.setattr(coach_module.time, "sleep", lambda s: None)
+    use(FakeClaude([_overloaded()] * 6 + [_text("finally")]))
+    uid = user["id"]
+    assert client.post(f"/users/{uid}/coach", json={"message": "hi"}).status_code == 503
+    assert client.post(f"/users/{uid}/coach", json={"message": "hi"}).status_code == 200
+
+
+def test_coach_limit_is_per_user(client, user, monkeypatch):
+    from conftest import sign_in
+    monkeypatch.setenv("COACH_DAILY_LIMIT", "1")
+    use(FakeClaude([_text("a"), _text("b")]))
+    assert client.post(f"/users/{user['id']}/coach", json={"message": "hi"}).status_code == 200
+
+    sign_in(client, sub="google-user-2", email="two@example.com")
+    other = client.post("/users", json={
+        "name": "Other", "height_cm": 165, "birth_year": 2000,
+        "sex": "female", "goal": "lose", "activity_level": "light",
+    }).json()["id"]
+    assert client.post(f"/users/{other}/coach", json={"message": "hi"}).status_code == 200

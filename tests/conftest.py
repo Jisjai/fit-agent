@@ -1,12 +1,24 @@
-"""Test fixtures: every test gets a brand-new, empty in-memory database."""
+"""Test fixtures: every test gets a brand-new, empty in-memory database,
+and a client that is already signed in (as a fake Google account)."""
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.database import Base, get_db
-from app.main import app
+os.environ.setdefault("SESSION_SECRET", "test-session-secret")
+
+from app import auth  # noqa: E402
+from app.database import Base, get_db  # noqa: E402
+from app.main import app  # noqa: E402
+
+
+def sign_in(client, sub="google-user-1", email="one@example.com", name="Test User"):
+    """Give the client a valid session cookie, as if it had signed in with Google."""
+    client.cookies.set(auth.COOKIE, auth.make_session({"sub": sub, "email": email, "name": name}))
+    return client
 
 
 @pytest.fixture
@@ -32,7 +44,7 @@ def db_session():
 def client(db_session):
     # Swap the real get_db for one that hands out our test session.
     app.dependency_overrides[get_db] = lambda: db_session
-    yield TestClient(app)
+    yield sign_in(TestClient(app))
     app.dependency_overrides.clear()
 
 

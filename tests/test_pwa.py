@@ -17,9 +17,9 @@ def test_every_icon_in_the_manifest_exists(client):
     assert client.get("/icons/apple-touch-icon.png").status_code == 200
 
 
-def test_install_files_work_without_logging_in(client, monkeypatch):
-    # Phones fetch these without the login cookie, so the password gate must let them through.
-    monkeypatch.setenv("APP_PASSWORD", "secret")
+def test_install_files_work_without_signing_in(client):
+    # Phones fetch these without the session cookie, so the sign-in check must let them through.
+    client.cookies.clear()
     for path in ["/manifest.webmanifest", "/sw.js", "/icons/icon-192.png", "/favicon.ico"]:
         assert client.get(path).status_code == 200, path
     assert client.get("/exercises").status_code == 401   # ...but the data stays locked

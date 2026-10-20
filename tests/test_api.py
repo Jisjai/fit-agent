@@ -1,3 +1,4 @@
+from conftest import sign_in
 from sqlalchemy import func, select
 
 from app.models import Workout, WorkoutSet
@@ -93,16 +94,35 @@ def test_validation_errors(client, user, exercises):
 # 6. Users can't see or touch each other's data
 def test_user_isolation(client, user):
     a = user["id"]
+    entry_id = client.post(f"/users/{a}/food", json=food()).json()["id"]
+
+    # Someone else signs in on the same server and makes their own profile.
+    sign_in(client, sub="google-user-2", email="two@example.com")
     b = client.post("/users", json={
         "name": "Other", "height_cm": 165, "birth_year": 2000,
         "sex": "female", "goal": "lose", "activity_level": "light",
     }).json()["id"]
 
-    entry_id = client.post(f"/users/{a}/food", json=food()).json()["id"]
-
-    assert client.get(f"/users/{b}/food").json() == []
+    # They only see their own profile...
+    assert [u["id"] for u in client.get("/users").json()] == [b]
+    # ...and A's data is invisible to them, exactly like a profile that doesn't exist.
+    assert client.get(f"/users/{a}").status_code == 404
+    assert client.get(f"/users/{a}/food").status_code == 404
+    assert client.post(f"/users/{a}/food", json=food()).status_code == 404
+    assert client.delete(f"/users/{a}/food/{entry_id}").status_code == 404
+    # Deleting A's entry through B's own profile doesn't work either.
     assert client.delete(f"/users/{b}/food/{entry_id}").status_code == 404
-    assert len(client.get(f"/users/{a}/food").json()) == 1  # still there
+
+    sign_in(client)  # back to A: the entry is untouched
+    assert len(client.get(f"/users/{a}/food").json()) == 1
+
+
+def test_one_profile_per_account(client, user):
+    r = client.post("/users", json={
+        "name": "Second", "height_cm": 170, "birth_year": 1990,
+        "sex": "male", "goal": "gain", "activity_level": "active",
+    })
+    assert r.status_code == 409
 
 
 # Extras
