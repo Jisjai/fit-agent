@@ -13,19 +13,19 @@ router = APIRouter(prefix="/users/{user_id}/coach", tags=["coach"])
 
 
 def get_ai_client():
-    """Dependency that provides the Gemini client.
+    """Dependency that provides the Claude (Anthropic) client.
 
     Being a dependency means tests can swap in a fake client, so the test suite
     never calls the real API (no cost, no network, predictable answers).
     """
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(
             status_code=503,
-            detail="The coach needs an API key. Set GEMINI_API_KEY and restart the server.",
+            detail="The coach needs an API key. Set ANTHROPIC_API_KEY and restart the server.",
         )
-    from google import genai  # imported here so the rest of the app runs without it
-    return genai.Client(api_key=api_key)
+    import anthropic  # imported here so the rest of the app runs without it
+    return anthropic.Anthropic(api_key=api_key)
 
 
 @router.post("", response_model=CoachReply)
@@ -41,7 +41,7 @@ def chat(
     except CoachBusy:
         raise HTTPException(
             status_code=503,
-            detail="The AI is overloaded right now (Google's side). Please try again in a minute.",
+            detail="The AI is overloaded right now (Anthropic's side). Please try again in a minute.",
         )
     except Exception as e:  # network trouble, invalid key, rate limit...
         raise HTTPException(status_code=502, detail=f"Coach unavailable: {type(e).__name__}: {e}")

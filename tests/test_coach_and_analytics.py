@@ -1,8 +1,8 @@
 import json
 from types import SimpleNamespace as NS
 
-from google.genai import errors as genai_errors
-from google.genai import types
+import anthropic
+import httpx
 
 import app.coach as coach_module
 
@@ -55,45 +55,45 @@ def test_list_workouts_in_range(client, user, exercises):
     assert [w["date"] for w in got] == ["2026-10-10", "2026-10-12"]
 
 
-# --- Coach (with a fake Gemini, so tests never call the real API) -------------
+# --- Coach (with a fake Claude client, so tests never call the real API) ------
 
-class FakeGemini:
-    """Pretends to be genai.Client(): returns pre-scripted responses in order."""
+class FakeClaude:
+    """Pretends to be anthropic.Anthropic(): returns pre-scripted responses in order."""
 
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
 
     @property
-    def models(self):  # so fake.models.generate_content(...) works like the real SDK
+    def messages(self):  # so fake.messages.create(...) works like the real SDK
         return self
 
-    def generate_content(self, **kwargs):
+    def create(self, **kwargs):
         # Copy the list: the coach keeps appending to the same one between calls.
-        self.calls.append({**kwargs, "contents": list(kwargs["contents"])})
+        self.calls.append({**kwargs, "messages": list(kwargs["messages"])})
         response = self.responses.pop(0)
-        if isinstance(response, Exception):  # lets a test simulate Google errors
+        if isinstance(response, Exception):  # lets a test simulate API errors
             raise response
         return response
 
 
 def _tool_call(name, args):
-    call = NS(id="call_1", name=name, args=args)
-    return NS(function_calls=[call], text=None,
-              candidates=[NS(content=types.Content(role="model", parts=[
-                  types.Part.from_function_call(name=name, args=args)]))])
+    block = NS(type="tool_use", id="toolu_1", name=name, input=args)
+    return NS(content=[block], stop_reason="tool_use")
 
 
 def _text(t):
-    return NS(function_calls=None, text=t, candidates=[])
+    return NS(content=[NS(type="text", text=t)], stop_reason="end_turn")
 
 
 def _tool_result(fake, call_index=1):
     """What our code sent back to the model as the first tool result."""
-    tool_turn = fake.calls[call_index]["contents"][-1]
-    assert tool_turn.role == "user"
-    assert tool_turn.parts[0].function_response is not None
-    return tool_turn.parts[0].function_response.response["result"]
+    tool_turn = fake.calls[call_index]["messages"][-1]
+    assert tool_turn["role"] == "user"
+    first = tool_turn["content"][0]
+    assert first["type"] == "tool_result"
+    assert first["tool_use_id"] == "toolu_1"   # linked to the request it answers
+    return json.loads(first["content"])
 
 
 def use(fake):
@@ -103,7 +103,7 @@ def use(fake):
 def test_coach_runs_tool_then_answers(client, user):
     uid = user["id"]
     client.post(f"/users/{uid}/weigh-ins", json={"date": "2026-10-14", "weight_kg": 80})
-    fake = FakeGemini([_tool_call("get_targets", {}), _text("Aim for about 2,700 kcal.")])
+    fake = FakeClaude([_tool_call("get_targets", {}), _text("Aim for about 2,700 kcal.")])
     use(fake)
 
     r = client.post(f"/users/{uid}/coach",
@@ -114,27 +114,27 @@ def test_coach_runs_tool_then_answers(client, user):
 
 
 def test_coach_without_api_key_returns_503(client, user, monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     r = client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
     assert r.status_code == 503
 
 
 def test_chat_history_is_passed_to_the_model(client, user):
-    fake = FakeGemini([_text("ok")])
+    fake = FakeClaude([_text("ok")])
     use(fake)
     client.post(f"/users/{user['id']}/coach", json={
         "message": "and now?",
         "history": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}],
     })
-    roles = [c.role for c in fake.calls[0]["contents"]]
-    assert roles == ["user", "model", "user"]
+    roles = [m["role"] for m in fake.calls[0]["messages"]]
+    assert roles == ["user", "assistant", "user"]
 
 
 # --- Coach logging -------------------------------------------------------------
 
 def test_coach_logs_food_from_chat(client, user):
     uid = user["id"]
-    use(FakeGemini([
+    use(FakeClaude([
         _tool_call("log_food", {"items": [
             {"meal": "breakfast", "description": "2 fried eggs", "calories": 180,
              "protein_g": 12, "carbs_g": 1, "fat_g": 14},
@@ -158,7 +158,7 @@ def test_coach_logs_food_from_chat(client, user):
 def test_coach_logs_workout_and_creates_new_exercise(client, user):
     uid = user["id"]
     client.post("/exercises", json={"name": "Bench Press", "muscle_group": "chest"})
-    use(FakeGemini([
+    use(FakeClaude([
         _tool_call("log_workout", {"exercises": [
             {"name": "bench press", "muscle_group": "chest",   # existing, different case
              "sets": [{"reps": 8, "weight_kg": 60}] * 3},
@@ -182,7 +182,7 @@ def test_coach_logs_workout_and_creates_new_exercise(client, user):
 
 def test_coach_bad_tool_input_is_reported_not_saved(client, user):
     uid = user["id"]
-    fake = FakeGemini([
+    fake = FakeClaude([
         _tool_call("log_food", {"items": [{"meal": "lunch", "description": "x",
                                             "calories": -50, "protein_g": 0,
                                             "carbs_g": 0, "fat_g": 0}]}),
@@ -202,16 +202,20 @@ def test_tool_schemas_have_no_refs():
     assert "$ref" not in json.dumps(TOOLS)
 
 
-# --- When Google is overloaded ---------------------------------------------------
+# --- When Anthropic is overloaded ------------------------------------------------
+
+_REQUEST = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
 
 def _overloaded():
-    return genai_errors.ServerError(503, {"error": {
-        "code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+    return anthropic.InternalServerError(
+        "Overloaded", response=httpx.Response(529, request=_REQUEST),
+        body={"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})
 
 
 def test_coach_retries_when_overloaded(client, user, monkeypatch):
     monkeypatch.setattr(coach_module.time, "sleep", lambda s: None)  # don't actually wait
-    fake = FakeGemini([_overloaded(), _overloaded(), _text("Hi!")])
+    fake = FakeClaude([_overloaded(), _overloaded(), _text("Hi!")])
     use(fake)
     r = client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
     assert r.status_code == 200
@@ -221,7 +225,7 @@ def test_coach_retries_when_overloaded(client, user, monkeypatch):
 
 def test_coach_falls_back_to_lighter_model(client, user, monkeypatch):
     monkeypatch.setattr(coach_module.time, "sleep", lambda s: None)
-    fake = FakeGemini([_overloaded()] * 3 + [_text("From the backup model.")])
+    fake = FakeClaude([_overloaded()] * 3 + [_text("From the backup model.")])
     use(fake)
     r = client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
     assert r.status_code == 200
@@ -231,7 +235,7 @@ def test_coach_falls_back_to_lighter_model(client, user, monkeypatch):
 
 def test_coach_gives_friendly_error_when_everything_is_busy(client, user, monkeypatch):
     monkeypatch.setattr(coach_module.time, "sleep", lambda s: None)
-    use(FakeGemini([_overloaded()] * 6))
+    use(FakeClaude([_overloaded()] * 6))
     r = client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
     assert r.status_code == 503
     assert "try again" in r.json()["detail"]
@@ -239,9 +243,10 @@ def test_coach_gives_friendly_error_when_everything_is_busy(client, user, monkey
 
 def test_coach_does_not_retry_a_bad_api_key(client, user, monkeypatch):
     monkeypatch.setattr(coach_module.time, "sleep", lambda s: None)
-    bad_key = genai_errors.ClientError(400, {"error": {
-        "code": 400, "message": "API key not valid", "status": "INVALID_ARGUMENT"}})
-    fake = FakeGemini([bad_key])
+    bad_key = anthropic.AuthenticationError(
+        "invalid x-api-key", response=httpx.Response(401, request=_REQUEST),
+        body={"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})
+    fake = FakeClaude([bad_key])
     use(fake)
     r = client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
     assert r.status_code == 502

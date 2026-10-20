@@ -1,9 +1,9 @@
-"""The AI coach: Gemini with tools that read AND write the user's own data.
+"""The AI coach: Claude with tools that read AND write the user's own data.
 
 How it works (the "agent loop"):
   1. We send the model the conversation plus a list of TOOLS it may call.
   2. If it wants to look something up or log something, its response contains
-     function_calls: which tool to call with which arguments.
+     tool_use blocks: which tool to call with which arguments.
   3. WE run that tool (a normal Python function over our database) and send
      the result back.
   4. Repeat until it answers in plain text.
@@ -18,8 +18,7 @@ import time
 import datetime as dt
 from datetime import timedelta
 
-from google.genai import errors as genai_errors
-from google.genai import types
+import anthropic
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
@@ -27,12 +26,13 @@ from . import services
 from .models import Meal, MuscleGroup, User
 from .schemas import FoodEntryCreate
 
-# "gemini-flash-latest" always points at Google's newest Flash model.
-MODEL = os.getenv("COACH_MODEL", "gemini-flash-latest")
+# Sonnet: strong at tool use and estimating portions. Override with COACH_MODEL.
+MODEL = os.getenv("COACH_MODEL", "claude-sonnet-5-5")
 # Used when the main model is overloaded: smaller, cheaper, usually has capacity.
-FALLBACK_MODEL = os.getenv("COACH_FALLBACK_MODEL", "gemini-flash-lite-latest")
-# 429 = too many requests, 500/503 = Google's side is struggling. Worth retrying.
-RETRYABLE_CODES = {429, 500, 503}
+FALLBACK_MODEL = os.getenv("COACH_FALLBACK_MODEL", "claude-haiku-5-5")
+# 429 = too many requests, 500/503 = server trouble, 529 = Anthropic is overloaded.
+RETRYABLE_CODES = {429, 500, 503, 529}
+MAX_TOKENS = 2048        # cap on each reply
 RETRY_WAITS = (0, 2, 4)  # seconds to wait before each attempt, per model
 MAX_TOOL_ROUNDS = 10     # safety stop so a confused model can't loop forever
 MAX_RANGE_DAYS = 90
@@ -297,22 +297,12 @@ def run_tool(db: Session, user: User, today: dt.date, name: str,
     return json.dumps(result, default=str), actions  # default=str turns dates into strings
 
 
-def _to_gemini_history(history: list[dict]) -> list[types.Content]:
-    """The web page sends [{"role": "user"|"assistant", "content": "..."}].
-    Gemini calls the assistant side "model" and wants text wrapped in Parts."""
-    return [
-        types.Content(role="model" if turn["role"] == "assistant" else "user",
-                      parts=[types.Part.from_text(text=turn["content"])])
-        for turn in history
-    ]
-
-
 class CoachBusy(Exception):
     """Every model we tried was overloaded. The user should simply try again later."""
 
 
-def _generate(client, contents, config):
-    """Call Gemini, retrying when it's overloaded and then falling back to a lighter model.
+def _generate(client, **request):
+    """Call Claude, retrying when it's overloaded and then falling back to a lighter model.
 
     Errors that retrying can't fix (bad API key, invalid request) are raised right away.
     """
@@ -320,9 +310,9 @@ def _generate(client, contents, config):
         for wait in RETRY_WAITS:
             time.sleep(wait)
             try:
-                return client.models.generate_content(model=model, contents=contents, config=config)
-            except genai_errors.APIError as e:
-                if e.code not in RETRYABLE_CODES:
+                return client.messages.create(model=model, **request)
+            except anthropic.APIStatusError as e:
+                if e.status_code not in RETRYABLE_CODES:
                     raise
     raise CoachBusy()
 
@@ -331,38 +321,32 @@ def ask_coach(db: Session, user: User, message: str, history: list[dict], client
               today: dt.date | None = None) -> tuple[str, list[str]]:
     """Run the agent loop. Returns (final text reply, list of things it logged)."""
     today = today or dt.date.today()
-    config = types.GenerateContentConfig(
-        system_instruction=system_prompt(user, today, services.exercise_names(db)),
-        tools=[types.Tool(function_declarations=[
-            types.FunctionDeclaration(name=t["name"], description=t["description"],
-                                      parameters_json_schema=t["input_schema"])
-            for t in TOOLS
-        ])],
-        # We run the tools ourselves, so we can validate input and track what was logged.
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-    )
-    contents = [*_to_gemini_history(history),
-                types.Content(role="user", parts=[types.Part.from_text(text=message)])]
+    system = system_prompt(user, today, services.exercise_names(db))
+    # The web page already uses Claude's format: [{"role": "user"|"assistant", "content": "..."}]
+    messages = [{"role": t["role"], "content": t["content"]} for t in history]
+    messages.append({"role": "user", "content": message})
     actions: list[str] = []
 
     for _ in range(MAX_TOOL_ROUNDS):
-        response = _generate(client, contents, config)
+        response = _generate(client, max_tokens=MAX_TOKENS, system=system,
+                             tools=TOOLS, messages=messages)
 
-        calls = response.function_calls or []
+        # A reply is a list of content blocks: "text" and/or "tool_use".
+        calls = [b for b in response.content if b.type == "tool_use"]
         if not calls:
-            return (response.text or "").strip() or "Sorry, I didn't get that. Could you rephrase?", actions
+            text = "".join(b.text for b in response.content if b.type == "text").strip()
+            return text or "Sorry, I didn't get that. Could you rephrase?", actions
 
         # Keep the model's turn (its tool requests) in the conversation...
-        contents.append(response.candidates[0].content)
-        # ...run every tool it asked for, and send all results back in one turn.
-        parts = []
+        messages.append({"role": "assistant", "content": response.content})
+        # ...run every tool it asked for, and send all results back in one user turn.
+        # Each result points at the request it answers via tool_use_id.
+        results = []
         for call in calls:
-            output, done = run_tool(db, user, today, call.name, dict(call.args or {}))
+            output, done = run_tool(db, user, today, call.name, dict(call.input or {}))
             actions += done
-            parts.append(types.Part.from_function_response(
-                name=call.name, response={"result": json.loads(output)}))
-        # Gemini expects tool results in a "user" turn (it rejects a "tool" role).
-        contents.append(types.Content(role="user", parts=parts))
+            results.append({"type": "tool_result", "tool_use_id": call.id, "content": output})
+        messages.append({"role": "user", "content": results})
 
     fallback = "Sorry, I got stuck partway. Check the log on the left and tell me what's missing."
     return fallback, actions
