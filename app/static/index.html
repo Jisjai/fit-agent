@@ -418,9 +418,17 @@ function renderWorkouts(workouts) {
     const lines = Object.entries(byEx).map(([n, sets]) => `${esc(n)}: ${sets.join(", ")}`).join("<br>");
     return `<li><span><span class="pill">workout</span>${lines}
               ${w.notes ? `<div class="muted">${esc(w.notes)}</div>` : ""}</span>
-            <span class="muted">${fmt(w.total_volume_kg)} kg</span></li>`;
+            <span class="muted">${fmt(w.total_volume_kg)} kg
+              <button class="link" data-del-workout="${w.id}" title="Delete workout">✕</button></span></li>`;
   }).join("");
 }
+
+$("#workoutList").addEventListener("click", async (e) => {
+  const id = e.target.dataset.delWorkout;
+  if (!id || !confirm("Delete this whole workout?")) return;
+  try { await api(`/users/${state.userId}/workouts/${id}`, { method: "DELETE" }); refresh(); }
+  catch (err) { toast(err.message); }
+});
 
 $("#foodList").addEventListener("click", async (e) => {
   const id = e.target.dataset.del;
@@ -549,7 +557,8 @@ async function sendChat(text) {
       refresh();  // the coach changed the log, so reload totals and lists
     }
     // Remember what was logged so the coach knows about it on the next message.
-    const memory = actions.length ? `${reply}\n[Logged: ${actions.join("; ")}]` : reply;
+    // Include the day: the user may switch days mid-chat, and the coach must know where things went.
+    const memory = actions.length ? `${reply}\n[Logged for ${state.day}: ${actions.join("; ")}]` : reply;
     state.chat.push({ role: "user", content: text }, { role: "assistant", content: memory });
   } catch (err) {
     thinking.className = "msg error"; thinking.textContent = err.message;

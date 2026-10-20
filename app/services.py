@@ -248,6 +248,17 @@ def food_by_day(db: Session, user_id: int, start: date, end: date) -> list[dict]
     ]
 
 
+def delete_workout(db: Session, user_id: int, workout_id: int) -> Workout | None:
+    """Delete a workout (and its sets) if it belongs to this user. Returns it, or None."""
+    workout = db.scalar(
+        select(Workout).where(Workout.id == workout_id, Workout.user_id == user_id)
+    )
+    if workout is not None:
+        db.delete(workout)
+        db.commit()
+    return workout
+
+
 def workouts_in_range(db: Session, user_id: int, start: date, end: date) -> list[Workout]:
     return list(db.scalars(
         select(Workout)

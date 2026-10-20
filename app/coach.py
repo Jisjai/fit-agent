@@ -62,7 +62,13 @@ LOGGING (your main job)
 - After logging, confirm briefly: one line per item with calories and protein for food.
   Then, if useful, one short coaching remark (e.g. how the day is tracking vs target).
 - Corrections ("actually it was 3 eggs", "delete the coffee"): call get_food_entries to find
-  the entry id, delete_food_entry the wrong one, then log the corrected one.
+  the entry id, delete_food_entry the wrong one, then log the corrected one. For workouts,
+  find the id with get_workouts and use delete_workout.
+- The user can switch the day shown in the app during a chat, so things you logged earlier
+  in this conversation may be on a different date than the current one. The notes in the
+  chat history say which day each item was logged on. NEVER log something a second time:
+  if an earlier item seems missing, look it up on the date it was logged (and nearby days)
+  before concluding anything, and if you're still unsure, ask the user instead of re-logging.
 
 COACHING
 - Base advice on the logged data. Use the tools to look it up instead of guessing,
@@ -140,6 +146,10 @@ class DeleteFoodInput(BaseModel):
     entry_id: int
 
 
+class DeleteWorkoutInput(BaseModel):
+    workout_id: int
+
+
 class NoInput(BaseModel):
     pass
 
@@ -168,6 +178,7 @@ TOOL_INPUTS: dict[str, type[BaseModel]] = {
     "log_workout": LogWorkoutInput,
     "get_food_entries": DayInput,
     "delete_food_entry": DeleteFoodInput,
+    "delete_workout": DeleteWorkoutInput,
     "get_profile": NoInput,
     "get_targets": NoInput,
     "get_daily_summary": DayInput,
@@ -187,6 +198,8 @@ TOOLS = [
     _tool("get_food_entries", "List the individual food entries for one day, with their ids. "
           "Use before deleting or correcting an entry.", DayInput),
     _tool("delete_food_entry", "Delete one food entry by id (to fix a mistake).", DeleteFoodInput),
+    _tool("delete_workout", "Delete one whole workout (all its sets) by id, e.g. a duplicate. "
+          "Find the id with get_workouts.", DeleteWorkoutInput),
     _tool("get_profile", "The user's profile: height, birth year, sex, goal (lose/maintain/gain) "
           "and activity level.", NoInput),
     _tool("get_targets", "Calculated maintenance calories, goal calorie target and protein "
@@ -198,8 +211,8 @@ TOOLS = [
           "average. Use the rolling average to judge real progress.", DaysInput),
     _tool("get_food_by_day", "Daily calorie and macro totals for each logged day between two "
           "dates. Days with nothing logged are absent.", RangeInput),
-    _tool("get_workouts", "Workouts between two dates with every set: exercise, reps, weight.",
-          RangeInput),
+    _tool("get_workouts", "Workouts between two dates, with their ids and every set: "
+          "exercise, reps, weight.", RangeInput),
     _tool("get_volume_by_muscle", "Number of sets and total volume per muscle group between two "
           "dates. Good for spotting neglected muscle groups.", RangeInput),
 ]
@@ -209,6 +222,11 @@ def _clamp_range(r: RangeInput) -> tuple[dt.date, dt.date]:
     start, end = sorted((r.start, r.end))
     # Cap the range so one tool call can't pull years of data into the prompt.
     return max(start, end - timedelta(days=MAX_RANGE_DAYS - 1)), end
+
+
+def _on(day: dt.date, today: dt.date) -> str:
+    """' · Mon 19 Oct' when something was logged on a day other than the one being viewed."""
+    return "" if day == today else f" · {day.strftime('%a %d %b')}"
 
 
 def run_tool(db: Session, user: User, today: dt.date, name: str,
@@ -234,7 +252,8 @@ def run_tool(db: Session, user: User, today: dt.date, name: str,
             saved.append({"id": entry.id, "date": entry.date, "meal": entry.meal.value,
                           "description": entry.description, "calories": entry.calories,
                           "protein_g": entry.protein_g})
-            actions.append(f"Food · {entry.description} · {round(entry.calories)} kcal")
+            actions.append(f"Food · {entry.description} · {round(entry.calories)} kcal"
+                           f"{_on(entry.date, today)}")
         days = sorted({s["date"] for s in saved})
         result = {"saved": saved,
                   "day_totals": [services.daily_summary(db, user.id, d) for d in days]}
@@ -244,7 +263,7 @@ def run_tool(db: Session, user: User, today: dt.date, name: str,
         _, created = services.log_weigh_in(db, user.id, day, args.weight_kg)
         result = {"saved": True, "date": day, "weight_kg": args.weight_kg,
                   "replaced_existing": not created}
-        actions.append(f"Weight · {args.weight_kg:g} kg")
+        actions.append(f"Weight · {args.weight_kg:g} kg{_on(day, today)}")
 
     elif name == "log_workout":
         day = args.date or today
@@ -256,7 +275,7 @@ def run_tool(db: Session, user: User, today: dt.date, name: str,
         result = {"saved": True, "workout_id": workout.id, "date": day,
                   "sets": len(workout.sets), "total_volume_kg": workout.total_volume_kg}
         names = ", ".join(ex.name for ex in args.exercises)
-        actions.append(f"Workout · {names} · {len(workout.sets)} sets")
+        actions.append(f"Workout · {names} · {len(workout.sets)} sets{_on(day, today)}")
 
     elif name == "get_food_entries":
         result = [{"id": e.id, "meal": e.meal.value, "description": e.description,
@@ -269,9 +288,17 @@ def run_tool(db: Session, user: User, today: dt.date, name: str,
             result = {"error": "No food entry with that id for this user."}
         else:
             result = {"deleted": True, "description": entry.description}
-            actions.append(f"Removed · {entry.description}")
+            actions.append(f"Removed · {entry.description}{_on(entry.date, today)}")
 
     # --- reading tools ---
+    elif name == "delete_workout":
+        workout = services.delete_workout(db, user.id, args.workout_id)
+        if workout is None:
+            result = {"error": "No workout with that id for this user."}
+        else:
+            result = {"deleted": True, "date": workout.date}
+            actions.append(f"Removed · workout{_on(workout.date, today)}")
+
     elif name == "get_profile":
         result = {"name": user.name, "height_cm": user.height_cm,
                   "birth_year": user.birth_year, "sex": user.sex.value,
@@ -286,7 +313,7 @@ def run_tool(db: Session, user: User, today: dt.date, name: str,
         result = services.food_by_day(db, user.id, *_clamp_range(args))
     elif name == "get_workouts":
         result = [
-            {"date": w.date, "notes": w.notes, "total_volume_kg": w.total_volume_kg,
+            {"id": w.id, "date": w.date, "notes": w.notes, "total_volume_kg": w.total_volume_kg,
              "sets": [{"exercise": s.exercise_name, "reps": s.reps, "weight_kg": s.weight_kg}
                       for s in w.sets]}
             for w in services.workouts_in_range(db, user.id, *_clamp_range(args))

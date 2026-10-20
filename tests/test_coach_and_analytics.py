@@ -292,3 +292,48 @@ def test_coach_limit_is_per_user(client, user, monkeypatch):
         "sex": "female", "goal": "lose", "activity_level": "light",
     }).json()["id"]
     assert client.post(f"/users/{other}/coach", json={"message": "hi"}).status_code == 200
+
+
+# --- Fixing mistakes across days ---------------------------------------------------
+
+def test_coach_can_find_and_delete_a_duplicate_workout(client, user, exercises):
+    uid = user["id"]
+    for day in ["2026-10-19", "2026-10-20"]:   # the same session logged twice
+        client.post(f"/users/{uid}/workouts", json={
+            "date": day, "sets": [{"exercise_id": exercises["Bench Press"], "reps": 8, "weight_kg": 60}],
+        })
+    dup_id = client.get(f"/users/{uid}/workouts",
+                        params={"start": "2026-10-20", "end": "2026-10-20"}).json()[0]["id"]
+
+    fake = FakeClaude([
+        _tool_call("get_workouts", {"start": "2026-10-19", "end": "2026-10-20"}),
+        _tool_call("delete_workout", {"workout_id": dup_id}),
+        _text("Removed the duplicate."),
+    ])
+    use(fake)
+    r = client.post(f"/users/{uid}/coach", json={"message": "remove the duplicate workout",
+                                                  "date": "2026-10-20"})
+    assert r.status_code == 200
+    assert all("id" in w for w in _tool_result(fake, 1))      # ids are visible to the coach
+    assert r.json()["actions"] == ["Removed · workout"]
+    left = client.get(f"/users/{uid}/workouts", params={"start": "2026-10-19", "end": "2026-10-20"})
+    assert [w["date"] for w in left.json()] == ["2026-10-19"]   # the original survives
+
+
+def test_actions_name_the_day_when_its_not_the_one_on_screen(client, user):
+    use(FakeClaude([
+        _tool_call("log_food", {"items": [
+            {"meal": "dinner", "description": "Pasta", "calories": 600,
+             "protein_g": 20, "carbs_g": 90, "fat_g": 15, "date": "2026-10-19"}]}),
+        _text("Logged yesterday's dinner."),
+    ]))
+    r = client.post(f"/users/{user['id']}/coach",
+                    json={"message": "yesterday I had pasta", "date": "2026-10-20"})
+    assert r.json()["actions"] == ["Food · Pasta · 600 kcal · Mon 19 Oct"]
+
+
+def test_coach_is_told_not_to_relog(client, user):
+    fake = FakeClaude([_text("ok")])
+    use(fake)
+    client.post(f"/users/{user['id']}/coach", json={"message": "hi"})
+    assert "NEVER log something a second time" in fake.calls[0]["system"]

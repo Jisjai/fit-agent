@@ -143,3 +143,31 @@ def test_summary_uses_latest_earlier_weight(client, user):
     s = client.get(f"/users/{uid}/summary", params={"date": DAY}).json()
     assert s["latest_weight_kg"] == 80.5
     assert s["calories"] == 0  # no food logged, coalesce gives 0 not null
+
+
+def test_delete_workout(client, user, exercises):
+    uid = user["id"]
+    wid = client.post(f"/users/{uid}/workouts", json={
+        "date": DAY, "sets": [{"exercise_id": exercises["Bench Press"], "reps": 8, "weight_kg": 60}],
+    }).json()["id"]
+
+    assert client.delete(f"/users/{uid}/workouts/{wid}").status_code == 204
+    assert client.get(f"/users/{uid}/workouts", params={"start": DAY, "end": DAY}).json() == []
+    assert client.delete(f"/users/{uid}/workouts/{wid}").status_code == 404   # already gone
+
+
+def test_cannot_delete_someone_elses_workout(client, user, exercises):
+    wid = client.post(f"/users/{user['id']}/workouts", json={
+        "date": DAY, "sets": [{"exercise_id": exercises["Bench Press"], "reps": 8, "weight_kg": 60}],
+    }).json()["id"]
+
+    sign_in(client, sub="google-user-2", email="two@example.com")
+    b = client.post("/users", json={
+        "name": "Other", "height_cm": 165, "birth_year": 2000,
+        "sex": "female", "goal": "lose", "activity_level": "light",
+    }).json()["id"]
+    assert client.delete(f"/users/{b}/workouts/{wid}").status_code == 404
+
+    sign_in(client)
+    assert len(client.get(f"/users/{user['id']}/workouts",
+                          params={"start": DAY, "end": DAY}).json()) == 1

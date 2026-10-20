@@ -69,6 +69,16 @@ def list_workouts(
     return services.workouts_in_range(db, user.id, start, end)
 
 
+@router.delete("/{workout_id}", status_code=204)
+def delete_workout(
+    workout_id: int,
+    user: User = Depends(get_user),
+    db: Session = Depends(get_db),
+):
+    if services.delete_workout(db, user.id, workout_id) is None:
+        raise HTTPException(status_code=404, detail="Workout not found")
+
+
 @router.get("/{workout_id}", response_model=WorkoutOut)
 def read_workout(
     workout_id: int,
